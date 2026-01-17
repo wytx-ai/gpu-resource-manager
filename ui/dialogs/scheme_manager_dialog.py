@@ -61,8 +61,10 @@ class SchemeManagerDialog(QDialog):
                 font-size: 11pt;
             }
         """)
-        # 双击事件 - 编辑
-        self.tree.itemDoubleClicked.connect(self.on_item_double_clicked)
+        # 启用内联编辑 - 只有GPU组名称列可编辑
+        self.tree.setEditTriggers(QTreeWidget.DoubleClicked | QTreeWidget.SelectedClicked)
+        # 监听编辑完成事件
+        self.tree.itemChanged.connect(self.on_item_changed)
         layout.addWidget(self.tree, stretch=1)
         
         # 在表头区域添加按钮（与"任务数量"列对齐）
@@ -157,16 +159,41 @@ class SchemeManagerDialog(QDialog):
     
     def refresh_list(self):
         """刷新列表"""
+        try:
+            self.tree.itemChanged.disconnect(self.on_item_changed)
+        except:
+            pass
         self.tree.clear()
         schemes = self.data_manager.get_all_schemes()
         for scheme in schemes:
             task_count = len(scheme.get("tasks", []))
             item = QTreeWidgetItem([str(scheme["id"]), scheme["name"], str(task_count)])
+            item.setData(0, Qt.UserRole, scheme["id"])
+            # 只有GPU组名称列（第1列）可编辑
+            flags = item.flags()
+            flags |= Qt.ItemIsEditable
+            item.setFlags(flags)
             self.tree.addTopLevelItem(item)
+        self.tree.itemChanged.connect(self.on_item_changed)
+        self.has_unsaved_changes = False
     
-    def on_item_double_clicked(self, item, column):
-        """双击行事件 - 编辑"""
-        self.edit_scheme()
+    def on_item_changed(self, item, column):
+        """项目编辑完成事件"""
+        if column == 1:  # 只处理GPU组名称列（第1列）的编辑
+            scheme_id = item.data(0, Qt.UserRole)
+            if scheme_id:
+                new_name = item.text(1).strip()
+                if new_name:
+                    self.data_manager.update_scheme(scheme_id, new_name)
+                    self.has_unsaved_changes = True
+                    if self.parent():
+                        self.parent().refresh_scheme_combo()
+                        self.parent().refresh_chart()
+                else:
+                    # 如果名称为空，恢复原名称
+                    scheme = self.data_manager.get_scheme(scheme_id)
+                    if scheme:
+                        item.setText(1, scheme["name"])
     
     def add_scheme(self):
         """添加GPU组"""

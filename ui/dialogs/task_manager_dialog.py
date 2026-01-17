@@ -74,8 +74,10 @@ class TaskManagerDialog(QDialog):
         """)
         # 选择事件 - 更新右侧分配列表
         self.tree.itemSelectionChanged.connect(self.on_task_selected)
-        # 双击事件 - 编辑任务名称
-        self.tree.itemDoubleClicked.connect(self.on_task_double_clicked)
+        # 启用内联编辑 - 只有任务名称列可编辑
+        self.tree.setEditTriggers(QTreeWidget.DoubleClicked | QTreeWidget.SelectedClicked)
+        # 监听编辑完成事件
+        self.tree.itemChanged.connect(self.on_task_item_changed)
         left_layout.addWidget(self.tree, stretch=1)
         
         # 在表头区域添加按钮
@@ -309,11 +311,21 @@ class TaskManagerDialog(QDialog):
     
     def refresh_list(self):
         """刷新列表"""
+        try:
+            self.tree.itemChanged.disconnect(self.on_task_item_changed)
+        except:
+            pass
         self.tree.clear()
         tasks = self.data_manager.get_all_tasks()
         for task in tasks:
             item = QTreeWidgetItem([str(task["id"]), task["name"]])
+            item.setData(0, Qt.UserRole, task["id"])
+            # 只有任务名称列（第1列）可编辑
+            flags = item.flags()
+            flags |= Qt.ItemIsEditable
+            item.setFlags(flags)
             self.tree.addTopLevelItem(item)
+        self.tree.itemChanged.connect(self.on_task_item_changed)
     
     def on_task_selected(self):
         """任务选择变化时更新分配列表"""
@@ -339,15 +351,34 @@ class TaskManagerDialog(QDialog):
                 item.setData(0, Qt.UserRole, alloc["gpu_id"])  # 存储gpu_id
                 self.alloc_tree.addTopLevelItem(item)
     
-    def on_task_double_clicked(self, item, column):
-        """双击任务行事件 - 编辑任务名称"""
-        self.edit_task()
+    
+    def on_task_item_changed(self, item, column):
+        """任务项目编辑完成事件"""
+        # 只处理任务名称列（第1列）的编辑
+        if column == 1:
+            task_id = item.data(0, Qt.UserRole)
+            if task_id:
+                new_name = item.text(1).strip()
+                if new_name:
+                    # 更新数据
+                    task = self.data_manager.get_task(task_id)
+                    if task:
+                        self.data_manager.update_task(task_id, new_name, task.get("description", ""))
+                        self.has_unsaved_changes = True
+                        # 通知主窗口刷新图表
+                        if self.parent():
+                            self.parent().refresh_chart()
+                else:
+                    # 如果名称为空，恢复原名称
+                    task = self.data_manager.get_task(task_id)
+                    if task:
+                        item.setText(1, task["name"])
     
     def on_alloc_double_clicked(self, item, column):
         """双击分配行事件 - 编辑显存分配"""
         if not self.current_task_id:
             return
-        gpu_id = item.data(0, Qt.UserRole)
+        gpu_id = item.data(1, Qt.UserRole)  # gpu_id存储在GPU名称列（第1列）
         self.edit_allocation(gpu_id)
     
     def add_task(self):
