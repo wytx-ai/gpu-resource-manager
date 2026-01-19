@@ -16,6 +16,8 @@ class TaskManagerDialog(QDialog):
         super().__init__(parent)
         self.data_manager = data_manager
         self.current_task_id = None
+        self.has_unsaved_changes = False  # 标记是否有未保存的更改
+        self.pending_changes = {}  # 存储待保存的更改 {task_id: new_name}
         self.setWindowTitle("任务管理")
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setGeometry(200, 200, 1200, 800)
@@ -74,8 +76,10 @@ class TaskManagerDialog(QDialog):
         """)
         # 选择事件 - 更新右侧分配列表
         self.tree.itemSelectionChanged.connect(self.on_task_selected)
-        # 启用内联编辑 - 只有任务名称列可编辑
-        self.tree.setEditTriggers(QTreeWidget.DoubleClicked | QTreeWidget.SelectedClicked)
+        # 启用内联编辑 - 只有任务名称列可编辑（ID列不能编辑）
+        self.tree.setEditTriggers(QTreeWidget.NoEditTriggers)  # 禁用默认编辑触发，手动控制
+        # 双击事件 - 检查列号，只有非ID列才允许编辑
+        self.tree.itemDoubleClicked.connect(self.on_item_double_clicked)
         # 监听编辑完成事件
         self.tree.itemChanged.connect(self.on_task_item_changed)
         left_layout.addWidget(self.tree, stretch=1)
@@ -136,6 +140,33 @@ class TaskManagerDialog(QDialog):
         main_layout.addWidget(right_widget, stretch=1)
         
         layout.addLayout(main_layout, stretch=1)
+        
+        # 底部保存按钮
+        bottom_layout = QHBoxLayout()
+        bottom_layout.addStretch()
+        self.save_btn = QPushButton("保存")
+        self.save_btn.setFont(QFont("Segoe UI", 11))
+        self.save_btn.setFixedSize(80, 35)
+        self.save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #5B8DEF;
+                color: #FFFFFF;
+                border: none;
+                border-radius: 6px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #4A7BC8;
+            }
+            QPushButton:disabled {
+                background-color: #CCCCCC;
+                color: #999999;
+            }
+        """)
+        self.save_btn.clicked.connect(self.save_changes)
+        self.save_btn.setEnabled(False)
+        bottom_layout.addWidget(self.save_btn)
+        layout.addLayout(bottom_layout)
     
     def setup_header_buttons(self):
         """在表头区域设置按钮"""
@@ -351,28 +382,101 @@ class TaskManagerDialog(QDialog):
                 item.setData(0, Qt.UserRole, alloc["gpu_id"])  # 存储gpu_id
                 self.alloc_tree.addTopLevelItem(item)
     
+    def on_item_double_clicked(self, item, column):
+        """双击事件 - 只有非ID列才允许编辑"""
+        if column == 0:  # ID列不允许编辑
+            return
+        # 对于其他列，手动触发编辑
+        self.tree.editItem(item, column)
     
     def on_task_item_changed(self, item, column):
         """任务项目编辑完成事件"""
-        # 只处理任务名称列（第1列）的编辑
+        # 只处理任务名称列（第1列）的编辑，ID列（第0列）不允许编辑
+        if column == 0:
+            # ID列被编辑，恢复原值
+            task_id = item.data(0, Qt.UserRole)
+            if task_id:
+                item.setText(0, str(task_id))
+            return
+        
         if column == 1:
             task_id = item.data(0, Qt.UserRole)
             if task_id:
                 new_name = item.text(1).strip()
                 if new_name:
-                    # 更新数据
-                    task = self.data_manager.get_task(task_id)
-                    if task:
-                        self.data_manager.update_task(task_id, new_name, task.get("description", ""))
-                        self.has_unsaved_changes = True
-                        # 通知主窗口刷新图表
-                        if self.parent():
-                            self.parent().refresh_chart()
+                    # 不立即保存，只标记为待保存
+                    self.pending_changes[task_id] = new_name
+                    self.has_unsaved_changes = True
+                    self.save_btn.setEnabled(True)
                 else:
                     # 如果名称为空，恢复原名称
                     task = self.data_manager.get_task(task_id)
                     if task:
                         item.setText(1, task["name"])
+                        # 移除待保存的更改
+                        if task_id in self.pending_changes:
+                            del self.pending_changes[task_id]
+                        if not self.pending_changes:
+                            self.has_unsaved_changes = False
+                            self.save_btn.setEnabled(False)
+    
+    def save_changes(self):
+        """保存所有待保存的更改"""
+        if not self.pending_changes:
+            return
+        
+        for task_id, new_name in self.pending_changes.items():
+            task = self.data_manager.get_task(task_id)
+            if task:
+                self.data_manager.update_task(task_id, new_name, task.get("description", ""))
+        
+        self.pending_changes.clear()
+        self.has_unsaved_changes = False
+        self.save_btn.setEnabled(False)
+        
+        # 通知主窗口刷新图表
+        if self.parent():
+            self.parent().refresh_chart()
+    
+    def closeEvent(self, event):
+        """关闭事件 - 如果有未保存的更改，确认是否保存"""
+        if self.has_unsaved_changes:
+            msg = QMessageBox(self)
+            msg.setWindowTitle("未保存的更改")
+            msg.setIcon(QMessageBox.Warning)
+            msg.setText("有未保存的更改，是否保存？")
+            save_btn = msg.addButton("保存", QMessageBox.YesRole)
+            discard_btn = msg.addButton("不保存", QMessageBox.NoRole)
+            cancel_btn = msg.addButton("取消", QMessageBox.RejectRole)
+            msg.exec_()
+            
+            if msg.clickedButton() == save_btn:
+                self.save_changes()
+                event.accept()
+            elif msg.clickedButton() == discard_btn:
+                # 恢复原值
+                try:
+                    self.tree.itemChanged.disconnect(self.on_task_item_changed)
+                except:
+                    pass
+                for task_id in self.pending_changes:
+                    item = None
+                    for i in range(self.tree.topLevelItemCount()):
+                        if self.tree.topLevelItem(i).data(0, Qt.UserRole) == task_id:
+                            item = self.tree.topLevelItem(i)
+                            break
+                    if item:
+                        task = self.data_manager.get_task(task_id)
+                        if task:
+                            item.setText(1, task["name"])
+                self.tree.itemChanged.connect(self.on_task_item_changed)
+                self.pending_changes.clear()
+                self.has_unsaved_changes = False
+                event.accept()
+            else:
+                event.ignore()
+        else:
+            event.accept()
     
     def on_alloc_double_clicked(self, item, column):
         """双击分配行事件 - 编辑显存分配"""

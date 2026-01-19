@@ -14,6 +14,8 @@ class SchemeManagerDialog(QDialog):
     def __init__(self, parent, data_manager):
         super().__init__(parent)
         self.data_manager = data_manager
+        self.has_unsaved_changes = False  # 标记是否有未保存的更改
+        self.pending_changes = {}  # 存储待保存的更改 {scheme_id: new_name}
         self.setWindowTitle("GPU组管理")
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setGeometry(200, 200, 900, 720)
@@ -61,14 +63,43 @@ class SchemeManagerDialog(QDialog):
                 font-size: 11pt;
             }
         """)
-        # 启用内联编辑 - 只有GPU组名称列可编辑
-        self.tree.setEditTriggers(QTreeWidget.DoubleClicked | QTreeWidget.SelectedClicked)
+        # 启用内联编辑 - 只有GPU组名称列可编辑（ID列不能编辑）
+        self.tree.setEditTriggers(QTreeWidget.NoEditTriggers)  # 禁用默认编辑触发，手动控制
+        # 双击事件 - 检查列号，只有非ID列才允许编辑
+        self.tree.itemDoubleClicked.connect(self.on_item_double_clicked)
         # 监听编辑完成事件
         self.tree.itemChanged.connect(self.on_item_changed)
         layout.addWidget(self.tree, stretch=1)
         
         # 在表头区域添加按钮（与"任务数量"列对齐）
         self.setup_header_buttons()
+        
+        # 底部保存按钮
+        bottom_layout = QHBoxLayout()
+        bottom_layout.addStretch()
+        self.save_btn = QPushButton("保存")
+        self.save_btn.setFont(QFont("Segoe UI", 11))
+        self.save_btn.setFixedSize(80, 35)
+        self.save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #5B8DEF;
+                color: #FFFFFF;
+                border: none;
+                border-radius: 6px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #4A7BC8;
+            }
+            QPushButton:disabled {
+                background-color: #CCCCCC;
+                color: #999999;
+            }
+        """)
+        self.save_btn.clicked.connect(self.save_changes)
+        self.save_btn.setEnabled(False)
+        bottom_layout.addWidget(self.save_btn)
+        layout.addLayout(bottom_layout)
     
     def setup_header_buttons(self):
         """在表头区域设置按钮"""
@@ -157,6 +188,13 @@ class SchemeManagerDialog(QDialog):
         # 设置按钮容器位置
         self.button_container.setGeometry(button_x, button_y, 60, 24)
     
+    def on_item_double_clicked(self, item, column):
+        """双击事件 - 只有非ID列才允许编辑"""
+        if column == 0:  # ID列不允许编辑
+            return
+        # 对于其他列，手动触发编辑
+        self.tree.editItem(item, column)
+    
     def refresh_list(self):
         """刷新列表"""
         try:
@@ -179,21 +217,89 @@ class SchemeManagerDialog(QDialog):
     
     def on_item_changed(self, item, column):
         """项目编辑完成事件"""
+        # ID列（第0列）不允许编辑，如果被编辑则恢复原值
+        if column == 0:
+            scheme_id = item.data(0, Qt.UserRole)
+            if scheme_id:
+                item.setText(0, str(scheme_id))
+            return
+        
         if column == 1:  # 只处理GPU组名称列（第1列）的编辑
             scheme_id = item.data(0, Qt.UserRole)
             if scheme_id:
                 new_name = item.text(1).strip()
                 if new_name:
-                    self.data_manager.update_scheme(scheme_id, new_name)
+                    # 不立即保存，只标记为待保存
+                    self.pending_changes[scheme_id] = new_name
                     self.has_unsaved_changes = True
-                    if self.parent():
-                        self.parent().refresh_scheme_combo()
-                        self.parent().refresh_chart()
+                    self.save_btn.setEnabled(True)
                 else:
                     # 如果名称为空，恢复原名称
                     scheme = self.data_manager.get_scheme(scheme_id)
                     if scheme:
                         item.setText(1, scheme["name"])
+                        # 移除待保存的更改
+                        if scheme_id in self.pending_changes:
+                            del self.pending_changes[scheme_id]
+                        if not self.pending_changes:
+                            self.has_unsaved_changes = False
+                            self.save_btn.setEnabled(False)
+    
+    def save_changes(self):
+        """保存所有待保存的更改"""
+        if not self.pending_changes:
+            return
+        
+        for scheme_id, new_name in self.pending_changes.items():
+            self.data_manager.update_scheme(scheme_id, new_name)
+        
+        self.pending_changes.clear()
+        self.has_unsaved_changes = False
+        self.save_btn.setEnabled(False)
+        
+        if self.parent():
+            self.parent().refresh_scheme_combo()
+            self.parent().refresh_chart()
+    
+    def closeEvent(self, event):
+        """关闭事件 - 如果有未保存的更改，确认是否保存"""
+        if self.has_unsaved_changes:
+            msg = QMessageBox(self)
+            msg.setWindowTitle("未保存的更改")
+            msg.setIcon(QMessageBox.Warning)
+            msg.setText("有未保存的更改，是否保存？")
+            save_btn = msg.addButton("保存", QMessageBox.YesRole)
+            discard_btn = msg.addButton("不保存", QMessageBox.NoRole)
+            cancel_btn = msg.addButton("取消", QMessageBox.RejectRole)
+            msg.exec_()
+            
+            if msg.clickedButton() == save_btn:
+                self.save_changes()
+                event.accept()
+            elif msg.clickedButton() == discard_btn:
+                # 恢复原值
+                try:
+                    self.tree.itemChanged.disconnect(self.on_item_changed)
+                except:
+                    pass
+                for scheme_id in self.pending_changes:
+                    item = None
+                    for i in range(self.tree.topLevelItemCount()):
+                        if self.tree.topLevelItem(i).data(0, Qt.UserRole) == scheme_id:
+                            item = self.tree.topLevelItem(i)
+                            break
+                    if item:
+                        scheme = self.data_manager.get_scheme(scheme_id)
+                        if scheme:
+                            item.setText(1, scheme["name"])
+                self.tree.itemChanged.connect(self.on_item_changed)
+                self.pending_changes.clear()
+                self.has_unsaved_changes = False
+                event.accept()
+            else:
+                event.ignore()
+        else:
+            event.accept()
     
     def add_scheme(self):
         """添加GPU组"""
