@@ -3,7 +3,7 @@
 """
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
                              QTreeWidget, QTreeWidgetItem, QMessageBox,
-                             QWidget, QComboBox, QLineEdit, QLabel)
+                             QWidget, QComboBox, QLineEdit, QLabel, QListWidget, QListWidgetItem, QCheckBox)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 from ui.dialogs.task_dialog import TaskDialog
@@ -520,7 +520,7 @@ class TaskManagerDialog(QDialog):
                     self.parent().refresh_chart()
     
     def show_allocation_dialog(self, task_id, pre_select_gpu_id=None, pre_fill_memory=None):
-        """显示显存分配对话框"""
+        """显示显存分配对话框 - 支持多选GPU"""
         gpus = self.data_manager.get_all_gpus()
         if not gpus:
             msg = QMessageBox(self)
@@ -538,17 +538,6 @@ class TaskManagerDialog(QDialog):
         for alloc in allocations:
             existing_allocations[alloc["gpu_id"]] = alloc["memory_usage"]
         
-        # 显示所有GPU（包括已分配的）
-        if not gpus:
-            msg = QMessageBox(self)
-            msg.setWindowTitle("提示")
-            msg.setWindowFlags(msg.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-            msg.setIcon(QMessageBox.Information)
-            msg.setText("请先添加GPU")
-            msg.addButton("确定", QMessageBox.AcceptRole)
-            msg.exec_()
-            return
-        
         # 创建选择对话框
         dialog = QDialog(self)
         dialog.setWindowTitle("显存分配")
@@ -558,7 +547,7 @@ class TaskManagerDialog(QDialog):
         layout.setSpacing(15)
         layout.setContentsMargins(25, 25, 25, 25)
         
-        # GPU选择
+        # GPU多选下拉列表
         gpu_layout = QHBoxLayout()
         gpu_label = QLabel("选择GPU:")
         gpu_label.setFont(QFont("Segoe UI", 11, QFont.Bold))
@@ -566,11 +555,15 @@ class TaskManagerDialog(QDialog):
         gpu_label.setMinimumWidth(100)
         gpu_layout.addWidget(gpu_label)
         
-        gpu_combo = QComboBox()
-        gpu_combo.setFont(QFont("Segoe UI", 11))
+        # 创建下拉列表视图（带复选框）
+        gpu_list_view = QListWidget()
+        gpu_list_view.setFont(QFont("Segoe UI", 11))
+        # 设置下拉视图的最大高度，确保可以显示更多内容
+        gpu_list_view.setMaximumHeight(300)  # 设置最大高度为300px，可以显示多个选项
         
-        # 存储每个GPU的当前分配显存（如果有）
-        gpu_current_memory = {}
+        # 存储每个GPU的信息和复选框
+        gpu_info = {}  # {gpu_id: {"name": ..., "total_memory": ..., "remaining_memory": ..., "current_memory": ..., "checkbox": ...}}
+        gpu_checkboxes = {}  # {gpu_id: checkbox}
         
         for gpu in gpus:
             # 计算该GPU的剩余显存
@@ -583,7 +576,14 @@ class TaskManagerDialog(QDialog):
             # 检查该GPU是否已分配给此任务
             is_allocated = gpu["id"] in existing_allocations
             current_memory = existing_allocations.get(gpu["id"], 0)
-            gpu_current_memory[gpu["id"]] = current_memory
+            
+            # 存储GPU信息
+            gpu_info[gpu["id"]] = {
+                "name": gpu["name"],
+                "total_memory": gpu["total_memory"],
+                "remaining_memory": remaining_memory,
+                "current_memory": current_memory
+            }
             
             # 显示：GPU名称 (总显存GB, 剩余显存GB) [已分配: XGB]
             if is_allocated:
@@ -591,7 +591,86 @@ class TaskManagerDialog(QDialog):
             else:
                 display_text = f"{gpu['name']} ({gpu['total_memory']:.1f}GB, 剩余{remaining_memory:.1f}GB)"
             
-            gpu_combo.addItem(display_text, gpu["id"])
+            # 创建列表项
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, gpu["id"])
+            
+            # 创建复选框
+            checkbox = QCheckBox(display_text)
+            checkbox.setFont(QFont("Segoe UI", 11))
+            # 如果指定了预选GPU，选中它
+            if pre_select_gpu_id and gpu["id"] == pre_select_gpu_id:
+                checkbox.setChecked(True)
+            gpu_checkboxes[gpu["id"]] = checkbox
+            
+            # 设置列表项大小
+            item.setSizeHint(checkbox.sizeHint())
+            gpu_list_view.addItem(item)
+            gpu_list_view.setItemWidget(item, checkbox)
+        
+        # 创建ComboBox并设置视图
+        gpu_combo = QComboBox()
+        gpu_combo.setFont(QFont("Segoe UI", 11))
+        gpu_combo.setView(gpu_list_view)
+        gpu_combo.setModel(gpu_list_view.model())
+        # 设置下拉视图的最小宽度，确保可以显示完整的GPU信息
+        # 计算最长的显示文本宽度
+        max_width = 0
+        for gpu in gpus:
+            usage = self.data_manager.get_gpu_usage(gpu["id"])
+            if usage:
+                remaining_memory = usage["free_memory"]
+            else:
+                remaining_memory = gpu["total_memory"]
+            is_allocated = gpu["id"] in existing_allocations
+            current_memory = existing_allocations.get(gpu["id"], 0)
+            if is_allocated:
+                display_text = f"{gpu['name']} ({gpu['total_memory']:.1f}GB, 剩余{remaining_memory:.1f}GB) [已分配:{current_memory:.1f}GB]"
+            else:
+                display_text = f"{gpu['name']} ({gpu['total_memory']:.1f}GB, 剩余{remaining_memory:.1f}GB)"
+            # 估算文本宽度（每个字符约8-10px，加上复选框宽度约30px）
+            text_width = len(display_text) * 8 + 50
+            max_width = max(max_width, text_width)
+        # 设置下拉视图的最小宽度，确保显示完整信息
+        gpu_combo.view().setMinimumWidth(max(max_width, 500))  # 至少500px宽
+        # 确保下拉视图可以显示滚动条
+        gpu_list_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        
+        # 更新显示文本的函数
+        def update_combo_text():
+            """更新ComboBox显示的文本"""
+            checked_gpus = []
+            for gpu_id, checkbox in gpu_checkboxes.items():
+                if checkbox.isChecked():
+                    checked_gpus.append(gpu_info[gpu_id]["name"])
+            if checked_gpus:
+                gpu_combo.setEditText(f"已选择 {len(checked_gpus)} 个GPU: {', '.join(checked_gpus[:3])}{'...' if len(checked_gpus) > 3 else ''}")
+            else:
+                gpu_combo.setEditText("请选择GPU")
+        
+        # 连接复选框状态变化事件
+        for checkbox in gpu_checkboxes.values():
+            checkbox.stateChanged.connect(update_combo_text)
+        
+        # 初始更新
+        update_combo_text()
+        
+        # 设置ComboBox为可编辑（用于显示选中项），但禁用实际编辑
+        gpu_combo.setEditable(True)
+        gpu_combo.lineEdit().setReadOnly(True)
+        gpu_combo.lineEdit().setStyleSheet("""
+            QLineEdit {
+                background-color: #FFFFFF;
+                border: 2px solid #E8ECF0;
+                border-radius: 8px;
+                padding: 10px 15px;
+                min-height: 20px;
+                color: #263238;
+            }
+            QLineEdit:focus {
+                border-color: #E8ECF0;
+            }
+        """)
         gpu_combo.setStyleSheet("""
             QComboBox {
                 background-color: #FFFFFF;
@@ -602,7 +681,23 @@ class TaskManagerDialog(QDialog):
                 color: #263238;
             }
             QComboBox:focus {
-                border-color: #5B8DEF;
+                border-color: #E8ECF0;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 30px;
+                background: transparent;
+            }
+            QComboBox::drop-down:hover {
+                background: #F8F9FA;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 6px solid #546E7A;
+                width: 0;
+                height: 0;
             }
             QComboBox QAbstractItemView {
                 background-color: #FFFFFF;
@@ -611,12 +706,21 @@ class TaskManagerDialog(QDialog):
                 border-radius: 8px;
                 selection-background-color: #E8ECF0;
                 selection-color: #263238;
+                padding: 4px;
+                max-height: 300px;  /* 设置最大高度，确保可以滚动查看所有内容 */
+                min-width: 500px;  /* 设置最小宽度，确保可以显示完整的GPU信息 */
+            }
+            QComboBox QAbstractItemView::item {
+                padding: 8px 12px;
+                border-radius: 4px;
+                color: #263238;
             }
             QComboBox QAbstractItemView::item:hover {
                 background-color: #F8F9FA;
                 color: #263238;
             }
         """)
+        
         gpu_layout.addWidget(gpu_combo, stretch=1)
         layout.addLayout(gpu_layout)
         
@@ -642,34 +746,11 @@ class TaskManagerDialog(QDialog):
                 border-color: #5B8DEF;
             }
         """)
+        # 如果指定了预填显存，使用它
+        if pre_fill_memory is not None:
+            memory_edit.setText(str(pre_fill_memory))
         memory_layout.addWidget(memory_edit, stretch=1)
         layout.addLayout(memory_layout)
-        
-        # 当选择GPU时，更新显存输入框
-        def on_gpu_selected(index):
-            gpu_id = gpu_combo.itemData(index)
-            if gpu_id in gpu_current_memory:
-                memory_edit.setText(str(gpu_current_memory[gpu_id]))
-            else:
-                memory_edit.setText("0")
-        
-        gpu_combo.currentIndexChanged.connect(on_gpu_selected)
-        
-        # 初始化显存输入框
-        if gpu_combo.count() > 0:
-            # 如果指定了预选GPU，选择它
-            if pre_select_gpu_id:
-                for i in range(gpu_combo.count()):
-                    if gpu_combo.itemData(i) == pre_select_gpu_id:
-                        gpu_combo.setCurrentIndex(i)
-                        break
-            # 如果指定了预填显存，使用它
-            if pre_fill_memory is not None:
-                memory_edit.setText(str(pre_fill_memory))
-            else:
-                on_gpu_selected(gpu_combo.currentIndex())
-        
-        layout.addStretch()
         
         # 按钮
         btn_layout = QHBoxLayout()
@@ -692,7 +773,6 @@ class TaskManagerDialog(QDialog):
                 background-color: #357ABD;
             }
         """)
-        ok_btn.clicked.connect(dialog.accept)
         btn_layout.addWidget(ok_btn)
         
         cancel_btn = QPushButton("取消")
@@ -717,12 +797,29 @@ class TaskManagerDialog(QDialog):
         
         layout.addLayout(btn_layout)
         
-        if dialog.exec_() == QDialog.Accepted:
-            gpu_id = gpu_combo.currentData()
+        def on_ok_clicked():
+            """确定按钮点击事件 - 验证并保存"""
+            # 获取选中的GPU（通过复选框）
+            selected_gpu_ids = []
+            for gpu_id, checkbox in gpu_checkboxes.items():
+                if checkbox.isChecked():
+                    selected_gpu_ids.append(gpu_id)
+            
+            if not selected_gpu_ids:
+                msg = QMessageBox(dialog)
+                msg.setWindowTitle("提示")
+                msg.setWindowFlags(msg.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+                msg.setIcon(QMessageBox.Information)
+                msg.setText("请至少选择一个GPU")
+                msg.addButton("确定", QMessageBox.AcceptRole)
+                msg.exec_()
+                return
+            
+            # 获取显存大小
             try:
                 memory = float(memory_edit.text())
                 if memory < 0:
-                    msg = QMessageBox(self)
+                    msg = QMessageBox(dialog)
                     msg.setWindowTitle("错误")
                     msg.setWindowFlags(msg.windowFlags() & ~Qt.WindowContextHelpButtonHint)
                     msg.setIcon(QMessageBox.Warning)
@@ -730,53 +827,76 @@ class TaskManagerDialog(QDialog):
                     msg.addButton("确定", QMessageBox.AcceptRole)
                     msg.exec_()
                     return
-                
-                # 如果显存为0，删除分配；否则添加或更新分配
-                if memory == 0:
-                    # 检查是否已存在分配
-                    if gpu_id in existing_allocations:
-                        self.data_manager.delete_allocation(task_id, gpu_id)
-                else:
-                    # 验证分配的显存是否超过GPU的剩余显存
-                    # 获取该GPU的使用情况
-                    usage = self.data_manager.get_gpu_usage(gpu_id)
-                    if usage:
-                        # 如果该GPU已经分配给当前任务，需要减去当前任务已分配的显存
-                        current_task_memory = existing_allocations.get(gpu_id, 0)
-                        # 实际可用的剩余显存 = 当前剩余显存 + 当前任务已分配的显存
-                        available_memory = usage["free_memory"] + current_task_memory
-                    else:
-                        # 如果获取不到使用情况，使用GPU的总显存
-                        gpu = self.data_manager.get_gpu(gpu_id)
-                        if gpu:
-                            available_memory = gpu["total_memory"]
-                        else:
-                            available_memory = 0
-                    
-                    # 检查分配的显存是否超过可用显存
-                    if memory > available_memory:
-                        msg = QMessageBox(self)
-                        msg.setWindowTitle("错误")
-                        msg.setWindowFlags(msg.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-                        msg.setIcon(QMessageBox.Warning)
-                        gpu = self.data_manager.get_gpu(gpu_id)
-                        gpu_name = gpu["name"] if gpu else "GPU"
-                        msg.setText(f"分配的显存 ({memory:.1f}GB) 超过了 {gpu_name} 的可用显存 ({available_memory:.1f}GB)")
-                        msg.addButton("确定", QMessageBox.AcceptRole)
-                        msg.exec_()
-                        return
-                    
-                    self.data_manager.add_allocation(task_id, gpu_id, memory)
-                
-                self.refresh_allocation_list()
             except ValueError:
-                msg = QMessageBox(self)
+                msg = QMessageBox(dialog)
                 msg.setWindowTitle("错误")
                 msg.setWindowFlags(msg.windowFlags() & ~Qt.WindowContextHelpButtonHint)
                 msg.setIcon(QMessageBox.Warning)
                 msg.setText("请输入有效的显存数值")
                 msg.addButton("确定", QMessageBox.AcceptRole)
                 msg.exec_()
+                return
+            
+            # 验证所有选中的GPU是否满足显存要求
+            invalid_gpus = []  # 存储不满足要求的GPU信息
+            
+            for gpu_id in selected_gpu_ids:
+                info = gpu_info[gpu_id]
+                
+                # 计算该GPU的可用显存
+                usage = self.data_manager.get_gpu_usage(gpu_id)
+                if usage:
+                    # 如果该GPU已经分配给当前任务，需要减去当前任务已分配的显存
+                    current_task_memory = existing_allocations.get(gpu_id, 0)
+                    # 实际可用的剩余显存 = 当前剩余显存 + 当前任务已分配的显存
+                    available_memory = usage["free_memory"] + current_task_memory
+                else:
+                    # 如果获取不到使用情况，使用GPU的总显存
+                    available_memory = info["total_memory"]
+                
+                # 检查分配的显存是否超过可用显存
+                if memory > available_memory:
+                    invalid_gpus.append({
+                        "name": info["name"],
+                        "available": available_memory,
+                        "requested": memory
+                    })
+            
+            # 如果有不满足要求的GPU，提示并阻止保存
+            if invalid_gpus:
+                error_msg = "以下GPU的显存不足，无法分配：\n\n"
+                for gpu in invalid_gpus:
+                    error_msg += f"• {gpu['name']}: 可用显存 {gpu['available']:.1f}GB，需要 {gpu['requested']:.1f}GB\n"
+                
+                msg = QMessageBox(dialog)
+                msg.setWindowTitle("错误")
+                msg.setWindowFlags(msg.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+                msg.setIcon(QMessageBox.Warning)
+                msg.setText(error_msg)
+                msg.addButton("确定", QMessageBox.AcceptRole)
+                msg.exec_()
+                return  # 不保存，直接返回
+            
+            # 所有验证通过，保存分配
+            for gpu_id in selected_gpu_ids:
+                if memory == 0:
+                    # 如果显存为0，删除分配
+                    if gpu_id in existing_allocations:
+                        self.data_manager.delete_allocation(task_id, gpu_id)
+                else:
+                    # 添加或更新分配
+                    self.data_manager.add_allocation(task_id, gpu_id, memory)
+            
+            # 刷新分配列表和图表
+            self.refresh_allocation_list()
+            if self.parent():
+                self.parent().refresh_chart()
+            
+            dialog.accept()
+        
+        ok_btn.clicked.connect(on_ok_clicked)
+        
+        dialog.exec_()
     
     def add_allocation(self):
         """添加显存分配"""
