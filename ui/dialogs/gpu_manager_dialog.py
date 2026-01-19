@@ -69,8 +69,10 @@ class GPUManagerDialog(QDialog):
                 font-size: 11pt;
             }
         """)
-        # 启用内联编辑 - GPU名称和总显存列可编辑
-        self.tree.setEditTriggers(QTreeWidget.DoubleClicked | QTreeWidget.SelectedClicked)
+        # 启用内联编辑 - GPU名称和总显存列可编辑（ID列不能编辑）
+        self.tree.setEditTriggers(QTreeWidget.NoEditTriggers)  # 禁用默认编辑触发，手动控制
+        # 双击事件 - 检查列号，只有非ID列才允许编辑
+        self.tree.itemDoubleClicked.connect(self.on_item_double_clicked)
         # 监听编辑完成事件
         self.tree.itemChanged.connect(self.on_item_changed)
         layout.addWidget(self.tree, stretch=1)
@@ -185,8 +187,22 @@ class GPUManagerDialog(QDialog):
         self.tree.itemChanged.connect(self.on_item_changed)
         self.has_unsaved_changes = False
     
+    def on_item_double_clicked(self, item, column):
+        """双击事件 - 只有非ID列才允许编辑"""
+        if column == 0:  # ID列不允许编辑
+            return
+        # 对于其他列，手动触发编辑
+        self.tree.editItem(item, column)
+    
     def on_item_changed(self, item, column):
         """项目编辑完成事件"""
+        # ID列（第0列）不允许编辑，如果被编辑则恢复原值
+        if column == 0:
+            gpu_id = item.data(0, Qt.UserRole)
+            if gpu_id:
+                item.setText(0, str(gpu_id))
+            return
+        
         gpu_id = item.data(0, Qt.UserRole)
         if not gpu_id:
             return
